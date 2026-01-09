@@ -11,3 +11,4 @@ message(STATUS ">> CUDA Compiler Version: ${CMAKE_CUDA_COMPILER_VERSION}")
 message(STATUS "---------------------------------------------------")
 
 add_subdirectory(small_pt)
+add_subdirectory(small_nee)

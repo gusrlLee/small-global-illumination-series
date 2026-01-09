@@ -1,5 +1,4 @@
 #include "Vector3.cuh"
-
 #include <vector>
 
 #define M_PI 3.14159265359f
@@ -40,6 +39,8 @@ struct Sphere
     Vector3 m_Position, m_Emissive, m_Color;
     Refl_t m_MaterialType;
 
+    __device__ bool IsLight() const { return (m_Emissive.x() > 0.0f) | (m_Emissive.y() > 0.0f) | (m_Emissive.z() > 0.0f); }
+
     __device__ float Intersect(const Ray &r) const
     {
         Vector3 op = m_Position - r.m_Origin;                   // distance from ray.orig to center sphere
@@ -52,9 +53,14 @@ struct Sphere
             disc = sqrtf(disc);                                                   // if disc >= 0, check for solutions using negative and positive discriminant
         return (t = b - disc) > epsilon ? t : ((t = b + disc) > epsilon ? t : 0); // pick closest point in front of ray origin
     }
+
+    __device__ Vector3 Sample() const {
+
+    }
 };
 
 __constant__ Sphere spheres[9];
+__constant__ Sphere lights[1];
 
 // __constant__ Sphere lights[1] = {
 //     {600.0f, {50.0f, 681.6f - .77f, 81.6f}, {2.0f, 1.8f, 1.6f}, {0.0f, 0.0f, 0.0f}, DIFF} // Light
@@ -91,6 +97,20 @@ __device__ inline bool TraceRay(const Ray &r, float &t, int &id)
     return t < inf;
 }
 
+__device__ inline bool TraceShadowRay(const Ray &r, float &tMax)
+{
+    float n = sizeof(spheres) / sizeof(Sphere), d;
+
+    float tChk = tMax - 0.0001f;
+    for (int i = int(n); i--;)
+    {
+        if (spheres[i].IsLight()) continue;
+        if ((d = spheres[i].Intersect(r)) && d > 0.001f && d < tChk) return true; // this shadow ray
+    }
+
+    return false; // this is not shadow ray
+}
+
 __device__ Vector3 Radiance(Ray &r, unsigned int *s1, unsigned int *s2, int maxDepth)
 {
     Vector3 color = Vector3(0.0f);
@@ -112,10 +132,12 @@ __device__ Vector3 Radiance(Ray &r, unsigned int *s1, unsigned int *s2, int maxD
         Vector3 nl = Dot(n, r.m_Direction) < 0 ? n : -n;
 
         color += thp * obj.m_Emissive;
+        if (obj.IsLight()) break;
 
         float r1 = 2 * M_PI * GetRandom(s1, s2);
         float r2 = GetRandom(s1, s2);
         float r2s = sqrtf(r2);
+        
         Vector3 w = nl;
         Vector3 u = Normalize(Cross((fabs(w.x()) > .1 ? Vector3(0, 1, 0) : Vector3(1, 0, 0)), w));
         Vector3 v = Cross(w, u);
@@ -180,6 +202,13 @@ int main()
     };
 
     cudaError_t err = cudaMemcpyToSymbol(spheres, spheres_h, sizeof(Sphere) * 9);
+    if (err != cudaSuccess) 
+    {
+        printf("Constant memory copy failed: %s\n", cudaGetErrorString(err));
+        return -1;
+    }
+
+    err = cudaMemcpyToSymbol(lights, lights_h, sizeof(Sphere) * 1);
     if (err != cudaSuccess) 
     {
         printf("Constant memory copy failed: %s\n", cudaGetErrorString(err));
