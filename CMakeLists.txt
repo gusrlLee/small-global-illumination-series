@@ -12,3 +12,4 @@ message(STATUS "---------------------------------------------------")
 
 add_subdirectory(small_pt)
 add_subdirectory(small_nee)
+add_subdirectory(small_mis)
