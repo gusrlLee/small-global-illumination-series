@@ -135,7 +135,6 @@ __device__ Vector3 Radiance(Ray &r, unsigned int *s1, unsigned int *s2, int maxD
         const Sphere &obj = spheres[id];
         // color += thp * obj.m_Emissive;
 
-
         Vector3 x = r.At(t);
         Vector3 n = Normalize(x - obj.m_Position);
         Vector3 nl = Dot(n, r.m_Direction) < 0 ? n : -n;
