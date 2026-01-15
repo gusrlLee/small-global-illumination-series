@@ -7,6 +7,16 @@ __host__ __device__ inline float Clamp(float x) { return x < 0.0f ? 0.0f : x > 1
                                                                                     : x; }
 __host__ __device__ inline int ToInt(float x){ return int(pow(Clamp(x), 1 / 2.2) * 255 + .5); }
 
+__device__ unsigned int WangHash(unsigned int seed)
+{
+    seed = (seed ^ 61) ^ (seed >> 16);
+    seed *= 9;
+    seed = seed ^ (seed >> 4);
+    seed *= 0x27d4eb2d;
+    seed = seed ^ (seed >> 15);
+    return seed;
+}
+
 __device__ static float GetRandom(unsigned int *seed0, unsigned int *seed1)
 {
     *seed0 = 36969 * ((*seed0) & 65535) + ((*seed0) >> 16); // hash the seeds using bitwise AND and bitshifts
@@ -82,12 +92,38 @@ struct Sphere
         float area = 4.0f * M_PI * m_Radius * m_Radius;
         pdf = 1.0f / area;
     }
+
+    __device__ float PdfLight(const Vector3& hitPoint, const Vector3 rayDir) const 
+    {
+        if (!IsLight()) return 0.0f;
+        Vector3 op = m_Position - hitPoint;
+        float distSq = op.SquareLength();
+        float dist = sqrtf(distSq);
+
+        float cosTheta = 1.0f;
+        float t = Intersect(Ray(hitPoint, rayDir));
+        if (t <= 0.0f) return 0.0f;
+
+        Vector3 lightPos = hitPoint + t * rayDir;
+        Vector3 lightNormal = Normalize(lightPos - m_Position);
+        float cosLight = fabs(Dot(lightNormal, -rayDir));
+
+        float area = 4.0f * M_PI * m_Radius * m_Radius;
+        float pdfArea = 1.0f / area;
+
+        return pdfArea * (t * t) / cosLight;
+    }
 };
 
 __constant__ Sphere spheres[9];
 __constant__ Sphere lights[1];
 
-
+__device__ inline float PowerHeuristic(float fPdf, float gPdf)
+{
+    float f2 = fPdf * fPdf;
+    float g2 = gPdf * gPdf;
+    return f2 / (f2 + g2 + 1e-5f);
+}
 
 __device__ inline bool TraceRay(const Ray &r, float &t, int &id)
 {
@@ -110,8 +146,8 @@ __device__ inline bool TraceShadowRay(const Ray &r, float &tMax)
     float tChk = tMax - 0.0001f;
     for (int i = int(n); i--;)
     {
-        if (spheres[i].IsLight()) continue;
-        if ((d = spheres[i].Intersect(r)) && d > 0.001f && d < tChk) return true; // this shadow ray
+        if ((d = spheres[i].Intersect(r)) && d > 0.001f && d < tChk) 
+            return true; // this shadow ray
     }
 
     return false; // this is not shadow ray
@@ -122,64 +158,81 @@ __device__ Vector3 Radiance(Ray &r, unsigned int *s1, unsigned int *s2, int maxD
     Vector3 color = Vector3(0.0f);
     Vector3 thp = Vector3(1.0f);
 
+    float lastBsdfPDf = 0.0f;
+    bool lastSpecular = true;
+
     for (int d = 0; d < maxDepth; d++)
     {
         float t;
-        int id = 0;
+        int id = -1;
 
         if (!TraceRay(r, t, id))
         {
-            return color;
+            break;
         }
         
         const Sphere &obj = spheres[id];
-        // color += thp * obj.m_Emissive;
+
+        // if obj is light, we need to stop traversal step.
+        if (obj.IsLight()) 
+        {
+            if (lastSpecular)
+            {
+                color += thp * obj.m_Emissive;
+            }
+            else
+            {
+                float distSq = t * t;
+                Vector3 lightNormal = Normalize(r.At(t) - obj.m_Position);
+                float lightAngleCosine = fabs(Dot(lightNormal, -r.m_Direction));
+
+                float lightArea = 4.0f * M_PI * obj.m_Radius * obj.m_Radius;
+                float lightPdfArea = 1.0f / lightArea;
+                float lightPdfSolid = lightPdfArea * (distSq / lightAngleCosine);
+
+                float weight = PowerHeuristic(lastBsdfPDf, lightPdfSolid);
+                color += thp * obj.m_Emissive * weight;
+            }
+
+            break; // terminate path tracing
+        }
 
         Vector3 x = r.At(t);
         Vector3 n = Normalize(x - obj.m_Position);
         Vector3 nl = Dot(n, r.m_Direction) < 0 ? n : -n;
 
-        // if obj is light, we need to stop traversal step.
-        if (obj.IsLight()) 
         {
-            if (d == 0)
-                color += thp * obj.m_Emissive;
-            break;
-        }
+            const Sphere &light = lights[0];
 
-        const Sphere &light = lights[0];
+            Vector3 lightPos;
+            float lightPdfArea;
+            light.OnSample(lightPos, lightPdfArea, s1, s2);
+            
+            Vector3 toLight = lightPos - x;
+            float distSq = toLight.SquareLength();
+            float dist = sqrtf(distSq);
+            Vector3 lightDir = Normalize(toLight);
+            float cosTheta = Dot(nl, lightDir);
 
-        Vector3 onLightSample;
-        float lightPdf;
-        light.OnSample(onLightSample, lightPdf, s1, s2);
-
-        Vector3 toLight = onLightSample - x;
-        float distSq = toLight.SquareLength();
-        float dist = toLight.Length();
-        Vector3 lightDir = Normalize(toLight);
-
-        float cosTheta = Dot(nl, lightDir);
-
-        if (cosTheta > 0.0f)
-        {
-            Ray shadowRay = Ray(x + nl * 0.0001f, lightDir);
-            if (!TraceShadowRay(shadowRay, dist))
+            if (cosTheta > 0.0f)
             {
-                Vector3 lightNormal = Normalize(onLightSample - light.m_Position);
-                float cosLight = Dot(-lightDir, lightNormal);
-                if (cosLight > 0.0f)
+                Vector3 lightNormal = Normalize(lightPos - light.m_Position);
+                float lightCosine = Dot(-lightDir, lightNormal);
+
+                if (lightCosine > 0.0f)
                 {
-                    // 1. geometry term
-                    // G(x, y) = ( | Nx . wi | * | Ny . -wi | ) / r^2
-                    float G = (cosTheta * cosLight) / distSq;
+                    Ray shadowRay(x + nl * 0.001f, lightDir);
+                    float shadowDist = dist - 0.002f;
+                    if (!TraceShadowRay(shadowRay, shadowDist))
+                    {
+                        float lightPdfSolid = lightPdfArea * (distSq / lightCosine);
+                        float bsdfPdf = cosTheta / M_PI;
+                        float weight = PowerHeuristic(lightPdfSolid, bsdfPdf);
+                        Vector3 brdf = obj.m_Color * (1.0f / M_PI);
 
-                    // 2, BRDF (Lambertian)
-                    // f_r = Albedo / PI
-                    Vector3 brdf = obj.m_Color * (1.0f / M_PI);
+                        color += thp * light.m_Emissive * brdf * cosTheta * weight / lightPdfSolid;
+                    }
 
-                    // 3. Monte Carlo Estimation
-                    // L_direct = Le * f_r * G / pdf
-                    color += thp * light.m_Emissive * brdf * (G / lightPdf);
                 }
             }
         }
@@ -192,9 +245,14 @@ __device__ Vector3 Radiance(Ray &r, unsigned int *s1, unsigned int *s2, int maxD
         Vector3 u = Normalize(Cross((fabs(w.x()) > .1 ? Vector3(0, 1, 0) : Vector3(1, 0, 0)), w));
         Vector3 v = Cross(w, u);
 
-        Vector3 newDir = Normalize(u * cos(r1) * r2s + v * sin(r1) * r2s + w * sqrtf(1 - r2));
-        r.m_Origin = x + nl * 0.05f;
-        r.m_Direction = newDir;
+        Vector3 nextDir = Normalize(u * cos(r1) * r2s + v * sin(r1) * r2s + w * sqrtf(1 - r2));
+
+        float cosNext = Dot(nextDir, nl);
+        lastBsdfPDf = cosNext / M_PI;
+        lastSpecular = false;
+        
+        r.m_Origin = x + nl * 0.001f;
+        r.m_Direction = nextDir;
 
         thp *= obj.m_Color;
         thp *= Dot(r.m_Direction, nl);
@@ -211,8 +269,11 @@ __global__ void RenderKernel(Vector3 *output, int w, int h, int spp, int maxDept
     if ((x >= w) || (y >= h))
         return;
 
-    unsigned int s1 = x;
-    unsigned int s2 = y;
+    unsigned int s1 = x * 374761393U + y * 668265263U;
+    unsigned int s2 = x * 668265263U + y * 374761393U;
+
+    GetRandom(&s1, &s2);
+    GetRandom(&s1, &s2);
 
     Camera cam(Vector3(50, 52, 295.6), Normalize(Vector3(0, -0.042612, -1)));
     Vector3 cx = Vector3(w * .5135 / h, 0.0f, 0.0f);
@@ -244,13 +305,13 @@ int main()
         {1e5f, {50.0f, -1e5f + 81.6f, 81.6f}, {0.0f, 0.0f, 0.0f}, {.75f, .75f, .75f}, DIFF},     // Top
         {16.5f, {27.0f, 16.5f, 47.0f}, {0.0f, 0.0f, 0.0f}, {1.0f, 1.0f, 1.0f}, DIFF},            // small sphere 1
         {16.5f, {73.0f, 16.5f, 78.0f}, {0.0f, 0.0f, 0.0f}, {1.0f, 1.0f, 1.0f}, DIFF},            // small sphere 2
-        // {600.0f, {50.0f, 681.6f - .77f, 81.6f}, {2.0f, 1.8f, 1.6f}, {0.0f, 0.0f, 0.0f}, DIFF}    // Light
-        {1.5f, {50.0f, 80.0f, 81.6f}, {120.0f, 120.0f, 120.0f}, {0.0f, 0.0f, 0.0f}, DIFF}
+        {600.0f, {50.0f, 681.6f - .77f, 81.6f}, {2.0f, 1.8f, 1.6f}, {0.0f, 0.0f, 0.0f}, DIFF}    // Light
+        // {1.5f, {50.0f, 80.0f, 81.6f}, {120.0f, 120.0f, 120.0f}, {0.0f, 0.0f, 0.0f}, DIFF}
     };
 
     Sphere lights_h[1] = {
-        // {600.0f, {50.0f, 681.6f - .77f, 81.6f}, {2.0f, 1.8f, 1.6f}, {0.0f, 0.0f, 0.0f}, DIFF}    // Light
-        {1.5f, {50.0f, 80.0f, 81.6f}, {120.0f, 120.0f, 120.0f}, {0.0f, 0.0f, 0.0f}, DIFF}
+        {600.0f, {50.0f, 681.6f - .77f, 81.6f}, {2.0f, 1.8f, 1.6f}, {0.0f, 0.0f, 0.0f}, DIFF}    // Light
+        // {1.5f, {50.0f, 80.0f, 81.6f}, {120.0f, 120.0f, 120.0f}, {0.0f, 0.0f, 0.0f}, DIFF}
     };
 
     cudaError_t err = cudaMemcpyToSymbol(spheres, spheres_h, sizeof(Sphere) * 9);
@@ -267,9 +328,9 @@ int main()
         return -1;
     }
 
-    int w = 1024;
-    int h = 1024;
-    int spp = 4096;
+    int w = 512;
+    int h = 512;
+    int spp = 4;
     int maxDepth = 5;
 
     Vector3 *output_h = new Vector3[w * h];
@@ -288,7 +349,7 @@ int main()
     cudaMemcpy(output_h, output_d, w * h * sizeof(Vector3), cudaMemcpyDeviceToHost);
     cudaFree(output_d);
 
-    FILE *f = fopen("output.ppm", "w");
+    FILE *f = fopen("smallmis.ppm", "w");
     fprintf(f, "P3\n%d %d\n%d\n", w, h, 255);
     for (int i = 0; i < w * h; i++)
     {

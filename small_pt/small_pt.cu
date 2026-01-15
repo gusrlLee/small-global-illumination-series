@@ -188,7 +188,7 @@ int main()
 
     int w = 512;
     int h = 512;
-    int spp = 4096;
+    int spp = 4;
     int maxDepth = 5;
 
     Vector3 *output_h = new Vector3[w * h];
@@ -207,7 +207,7 @@ int main()
     cudaMemcpy(output_h, output_d, w * h * sizeof(Vector3), cudaMemcpyDeviceToHost);
     cudaFree(output_d);
 
-    FILE *f = fopen("output.ppm", "w");
+    FILE *f = fopen("smallpt.ppm", "w");
     fprintf(f, "P3\n%d %d\n%d\n", w, h, 255);
     for (int i = 0; i < w * h; i++)
     {
