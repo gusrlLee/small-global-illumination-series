@@ -1,0 +1,9 @@
+#ifndef __TINY_PATH_TRACING_CAMERA_HEADER__
+#define __TINY_PATH_TRACING_CAMERA_HEADER__
+
+struct Camera 
+{
+
+};
+
+#endif // __TINY_PATH_TRACING_CAMERA_HEADER__
