@@ -9,7 +9,7 @@ struct Triangle
     Vec3 v0, v1, v2; //vertices of triangle
     Vec3 e1, e2; // edges of triangle 
     Vec3 n; // normalized normal vector 
-    Material mat; // material of triangle
+    uint32_t matId; // material index of triangle
 
     __host__ __device__ Triangle() {}
     __host__ __device__ Triangle(const Vec3& v0, const Vec3& v1, const Vec3& v2) : v0(v0), v1(v1), v2(v2) 
@@ -18,7 +18,7 @@ struct Triangle
         e2 = v2 - v0; // edge 2
         n = normalize(cross(e1, e2)); // normal vector 
     }
-    __host__ __device__ Triangle(const Vec3& vertex0, const Vec3& vertex1, const Vec3& vertex2, const Material& material) : v0(vertex0), v1(vertex1), v2(vertex2), mat(material) 
+    __host__ __device__ Triangle(const Vec3& vertex0, const Vec3& vertex1, const Vec3& vertex2, const uint32_t& materialId) : v0(vertex0), v1(vertex1), v2(vertex2), matId(materialId) 
     {
         e1 = v1 - v0; // edge 1
         e2 = v2 - v0; // edge 2

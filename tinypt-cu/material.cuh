@@ -6,7 +6,8 @@
 
 enum Type {
     eLAMBERTIAN,
-    eMETAL,
+    eDIELECTRIC,
+    eSPECULAR,
     eDIFFUSE_LIGHT,
 };
 

@@ -5,12 +5,13 @@
 #include "stb/stb_image_write.h"
 #include "tinyobjloader/tiny_obj_loader.h"
 
+#include "scene.cuh"
 #include "triangle.cuh"
 #include "material.cuh"
 
 namespace utils
 {
-    std::vector<Triangle> loadObj(const std::string &fp, const std::string &mtlFp);
+    Scene loadObj(const std::string &fp, const std::string &mtlFp);
 }
 
 
