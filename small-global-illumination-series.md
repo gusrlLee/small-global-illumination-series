@@ -1,7 +1,7 @@
 # small-global-illumination-series
 
 - [x] small-pt (path tracing)
-- [ ] small-pt + tiny-obj-loader
+- [x] small-pt + tiny-obj-loader
 - [ ] small-pt + tiny-gltf
 - [x] small-nee (next event estimation)
 - [x] small-mis (multiple importance sampling)

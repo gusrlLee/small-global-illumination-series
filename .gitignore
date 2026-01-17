@@ -3,3 +3,4 @@ build
 .vscode
 *.ppm
 scenes
+*.png
