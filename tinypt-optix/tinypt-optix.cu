@@ -1,6 +1,9 @@
 #include <iostream>
 #include <stdexcept>
 #include <filesystem>
+#include <fstream>
+#include <sstream>
+#include <string>
 #include <vector>
 #include <algorithm>
 #include <cmath>
@@ -420,6 +423,20 @@ __global__ void render(
     randState[pIdx] = localRandState;
 }
 
+
+std::string readSourceFile(std::string const& filename)
+{
+    std::ifstream input(filename.c_str());
+    if (!input.good())
+    {
+        std::runtime_error("Couldn't open file : " + filename);
+    }
+
+    std::stringstream source;
+    source << input.rdbuf();
+    return source.str();
+}
+
 int main(int argc, char *argv[])
 {
     try
@@ -437,10 +454,135 @@ int main(int argc, char *argv[])
 #else
         options.validationMode = OPTIX_DEVICE_CONTEXT_VALIDATION_MODE_OFF;
 #endif
+        // context create
         OptixDeviceContext context = nullptr;
         CUcontext cuCtx = 0; // 0 means current CUDA context 
         OPTIX_CHECK(optixDeviceContextCreate(cuCtx, &options, &context));
         std::cout << "OptiX Context created successfully!" << std::endl;
+
+        // pipeline setting 
+        OptixPipelineCompileOptions pipelineOpts = {};
+        pipelineOpts.numPayloadValues = 2;
+        pipelineOpts.numAttributeValues = 2;
+
+#ifdef _DEBUG
+        pipelineOpts.exceptionFlags = OPTIX_EXCEPTION_FLAG_USER | OPTIX_EXCEPTION_FLAG_TRACE_DEPTH | OPTIX_EXCEPTION_FLAG_STACK_OVERFLOW;
+        // pipelineOpts.exceptionFlags = OPTIX_EXCEPTION_FLAG_NONE;
+#else
+        pipelineOpts.exceptionFlags = OPTIX_EXCEPTION_FLAG_NONE;
+#endif
+        pipelineOpts.traversableGraphFlags = OPTIX_TRAVERSABLE_GRAPH_FLAG_ALLOW_SINGLE_LEVEL_INSTANCING;
+
+        OptixModuleCompileOptions moduleOpts = {};
+#ifdef _DEBUG
+        moduleOpts.maxRegisterCount = OPTIX_COMPILE_DEFAULT_MAX_REGISTER_COUNT;
+        moduleOpts.optLevel         = OPTIX_COMPILE_OPTIMIZATION_LEVEL_0;
+        moduleOpts.debugLevel       = OPTIX_COMPILE_DEBUG_LEVEL_FULL;
+#else
+        moduleOpts.optLevel         = OPTIX_COMPILE_OPTIMIZATION_LEVEL_3;
+        moduleOpts.debugLevel       = OPTIX_COMPILE_DEBUG_LEVEL_NONE;
+#endif
+
+        OptixModule module = nullptr;
+        std::string ptx_code = readSourceFile( "./build/tinypt-optix/ptx/device_programs.ptx" );
+
+        char log[2048];
+        size_t sizeof_log = sizeof( log );
+
+        OPTIX_CHECK( optixModuleCreate(
+            context,
+            &moduleOpts,
+            &pipelineOpts,
+            ptx_code.c_str(),
+            ptx_code.size(),
+            log,
+            &sizeof_log,
+            &module
+        ) );
+        
+        // 혹시 모듈 생성 중 경고가 있었다면 출력
+        if( sizeof_log > 1 ) std::cout << "Module Create Log: " << log << std::endl;
+        std::cout << "OptiX Module created successfully!" << std::endl;
+
+        // Program Group create
+        OptixProgramGroupOptions programGroupOpts = {};
+        std::vector<OptixProgramGroup> programGroups;
+
+        OptixProgramGroup raygenProgGroup = nullptr;
+        OptixProgramGroup missProgGroup = nullptr;
+        OptixProgramGroup hitGroupProgGroup = nullptr;
+
+        OptixProgramGroupDesc raygenDesc  = {};
+        raygenDesc.kind = OPTIX_PROGRAM_GROUP_KIND_RAYGEN;
+        raygenDesc.raygen.module = module;
+        raygenDesc.raygen.entryFunctionName = "__raygen__rg";
+
+        OptixProgramGroupDesc missDesc  = {};
+        missDesc.kind = OPTIX_PROGRAM_GROUP_KIND_MISS;
+        missDesc.miss.module = module;
+        missDesc.miss.entryFunctionName = "__miss__ms";
+
+        OptixProgramGroupDesc hitGroupDesc  = {};
+        hitGroupDesc.kind = OPTIX_PROGRAM_GROUP_KIND_HITGROUP;
+        hitGroupDesc.hitgroup.moduleCH = module;
+        hitGroupDesc.hitgroup.entryFunctionNameCH = "__closesthit__ch";
+
+        sizeof_log = sizeof(log);
+
+        // ray generation group
+        OPTIX_CHECK( optixProgramGroupCreate(
+            context, &raygenDesc, 1, &programGroupOpts,
+            log, &sizeof_log, &raygenProgGroup
+        ) );
+        if( sizeof_log > 1 ) std::cout << "RayGen Group Log: " << log << std::endl;
+        programGroups.push_back(raygenProgGroup);
+
+        // miss group 
+        OPTIX_CHECK( optixProgramGroupCreate(
+            context, &missDesc, 1, &programGroupOpts,
+            log, &sizeof_log, &missProgGroup
+        ) );
+        if( sizeof_log > 1 ) std::cout << "Miss Group Log: " << log << std::endl;
+        programGroups.push_back(missProgGroup);
+
+        // hit group
+        OPTIX_CHECK( optixProgramGroupCreate(
+            context, &hitGroupDesc, 1, &programGroupOpts,
+            log, &sizeof_log, &hitGroupProgGroup
+        ) );
+        if( sizeof_log > 1 ) std::cout << "HitGroup Group Log: " << log << std::endl;
+        programGroups.push_back(hitGroupProgGroup);
+
+        std::cout << "Program Groups created successfully!" << std::endl;
+
+        // pipeline 
+        OptixPipelineLinkOptions pipelineLinkOpts = {};
+        pipelineLinkOpts.maxTraceDepth = 2;
+
+        OptixPipeline pipeline = nullptr;
+        sizeof_log = sizeof(log);
+
+        OPTIX_CHECK( optixPipelineCreate(
+            context,
+            &pipelineOpts,           
+            &pipelineLinkOpts,  
+            programGroups.data(),  
+            (unsigned int)programGroups.size(), 
+            log,
+            &sizeof_log,
+            &pipeline
+        ) );
+
+        if( sizeof_log > 1 ) std::cout << "Pipeline Create Log: " << log << std::endl;
+        std::cout << "OptiX Pipeline created successfully!" << std::endl;
+
+        OPTIX_CHECK( optixPipelineDestroy( pipeline ) );
+        
+        OPTIX_CHECK( optixProgramGroupDestroy( hitGroupProgGroup ) );
+        OPTIX_CHECK( optixProgramGroupDestroy( missProgGroup ) );
+        OPTIX_CHECK( optixProgramGroupDestroy( raygenProgGroup ) );
+        
+        OPTIX_CHECK( optixModuleDestroy( module ) );
         OPTIX_CHECK( optixDeviceContextDestroy( context ) );
     }
     catch (const std::exception& e)
