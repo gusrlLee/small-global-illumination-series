@@ -67,6 +67,9 @@ struct TriangleMesh
 {
     std::vector<float3> vertices;
     std::vector<uint3> indices;
+
+    std::vector<unsigned int> matIndices;
+    std::vector<MaterialData> materials;
 };
 
 bool loadModel(const std::string &filename, const std::string &mtlDir, TriangleMesh &mesh)
@@ -94,28 +97,46 @@ bool loadModel(const std::string &filename, const std::string &mtlDir, TriangleM
     auto &shapes = reader.GetShapes();
     auto &materials = reader.GetMaterials();
 
+    for (const auto& mat : materials) 
+    {
+        MaterialData m;
+        m.diffuse = make_float3(mat.diffuse[0], mat.diffuse[1], mat.diffuse[2]);
+        m.emission = make_float3(mat.emission[0], mat.emission[1], mat.emission[2]);
+        mesh.materials.push_back(m);
+    }
+
+    if (mesh.materials.empty()) 
+    {
+        MaterialData m = { make_float3(0.7f, 0.7f, 0.7f), make_float3(0.0f, 0.0f, 0.0f) };
+        mesh.materials.push_back(m);
+    }
+
     for (const auto &shape : shapes)
     {
         size_t index_offset = 0;
         for (size_t f = 0; f < shape.mesh.num_face_vertices.size(); f++)
         {
             int fv = 3;
+            // vertex
             for (size_t v = 0; v < fv; v++)
             {
                 tinyobj::index_t idx = shape.mesh.indices[index_offset + v];
-
                 tinyobj::real_t vx = attrib.vertices[3 * idx.vertex_index + 0];
                 tinyobj::real_t vy = attrib.vertices[3 * idx.vertex_index + 1];
                 tinyobj::real_t vz = attrib.vertices[3 * idx.vertex_index + 2];
-
                 mesh.vertices.push_back(make_float3(vx, vy, vz));
             }
 
+            // index
             unsigned int current_v_count = (unsigned int)mesh.vertices.size();
             mesh.indices.push_back(make_uint3(
                 current_v_count - 3,
                 current_v_count - 2,
                 current_v_count - 1));
+
+            int matId = shape.mesh.material_ids[f];
+            if (matId < 0) matId = 0; // 재질 없으면 0번 사용
+            mesh.matIndices.push_back((unsigned int)matId);
 
             index_offset += fv;
         }
@@ -123,7 +144,9 @@ bool loadModel(const std::string &filename, const std::string &mtlDir, TriangleM
 
     std::cout << "Model Loaded: " << filename << "\n"
               << "  Vertices: " << mesh.vertices.size() << "\n"
-              << "  Triangles: " << mesh.indices.size() << std::endl;
+              << "  Triangles: " << mesh.indices.size() << "\n" 
+              << "  Materials: " << mesh.materials.size() << "\n"
+              << "  MatIndices: " << mesh.matIndices.size() << std::endl;
 
     return true;
 }
@@ -258,7 +281,8 @@ int main(int argc, char *argv[])
 #else
         pipelineOpts.exceptionFlags = OPTIX_EXCEPTION_FLAG_NONE;
 #endif
-        pipelineOpts.traversableGraphFlags = OPTIX_TRAVERSABLE_GRAPH_FLAG_ALLOW_SINGLE_LEVEL_INSTANCING;
+        // pipelineOpts.traversableGraphFlags = OPTIX_TRAVERSABLE_GRAPH_FLAG_ALLOW_SINGLE_LEVEL_INSTANCING;
+        pipelineOpts.traversableGraphFlags = OPTIX_TRAVERSABLE_GRAPH_FLAG_ALLOW_SINGLE_GAS;
 
         OptixModuleCompileOptions moduleOpts = {};
 #ifdef _DEBUG
@@ -433,6 +457,15 @@ int main(int argc, char *argv[])
         );
 
         std::cout << "Acceleration Structure built!" << std::endl;
+        CUdeviceptr d_materials = 0;
+        size_t materialSize = sizeof(MaterialData) * mesh.materials.size();
+        CUDA_CHECK(cudaMalloc((void**)&d_materials, materialSize));
+        CUDA_CHECK(cudaMemcpy((void*)d_materials, mesh.materials.data(), materialSize, cudaMemcpyHostToDevice));
+
+        CUdeviceptr d_mat_indices = 0;
+        size_t matIndexSize = sizeof(unsigned int) * mesh.matIndices.size();
+        CUDA_CHECK(cudaMalloc((void**)&d_mat_indices, matIndexSize));
+        CUDA_CHECK(cudaMemcpy((void*)d_mat_indices, mesh.matIndices.data(), matIndexSize, cudaMemcpyHostToDevice));
 
         int width = 800;
         int height = 800;
@@ -440,27 +473,51 @@ int main(int argc, char *argv[])
         uchar4 *dImage = nullptr;
         CUDA_CHECK(cudaMalloc((void **)&dImage, width * height * sizeof(uchar4)));
 
+        float4 *dAccum = nullptr;
+        CUDA_CHECK(cudaMalloc((void **)&dAccum, width * height * sizeof(float4)));
+        CUDA_CHECK(cudaMemset(dAccum, 0, width * height * sizeof(float4)));
+
         Params params;
         params.image = dImage;
+        params.accum_buffer = dAccum;
         params.width = width;
         params.height = height;
         params.handle = handle;
+        params.vertices = (float3*)d_vertices;
+        params.indices = (uint3*)d_indices;
+        params.materials = (MaterialData*)d_materials;
+        params.matIndices = (unsigned int*)d_mat_indices;
 
         CUdeviceptr dParams;
         CUDA_CHECK(cudaMalloc((void **)&dParams, sizeof(Params)));
         CUDA_CHECK(cudaMemcpy((void *)dParams, &params, sizeof(Params), cudaMemcpyHostToDevice));
 
         std::cout << "Launching OptiX..." << std::endl;
+        int samples = 4096;
+    // 2. 렌더링 루프 (Progressive Update)
+        for (int i = 0; i < samples; ++i) {
+            params.frame_index = i; // 프레임 번호 업데이트
 
-        OPTIX_CHECK(optixLaunch(
-            pipeline,
-            0,
-            dParams,
-            sizeof(Params),
-            &sbt,
-            width,
-            height,
-            1));
+            // 변경된 params를 GPU로 복사
+            CUDA_CHECK(cudaMemcpy((void *)dParams, &params, sizeof(Params), cudaMemcpyHostToDevice));
+
+            // 커널 실행
+            OPTIX_CHECK(optixLaunch(
+                pipeline,
+                0,
+                dParams,
+                sizeof(Params),
+                &sbt,
+                width,
+                height,
+                1));
+
+            // 진행 상황 표시 (선택 사항)
+            if ((i + 1) % 100 == 0) {
+                std::cout << "Rendered " << (i + 1) << " / " << samples << " samples" << std::endl;
+                cudaDeviceSynchronize(); 
+            }
+        }
 
         CUDA_CHECK(cudaDeviceSynchronize());
         std::cout << "OptiX Launch finished!" << std::endl;
@@ -471,6 +528,10 @@ int main(int argc, char *argv[])
         int stride = width * sizeof(uchar4);
         stbi_write_png(outfile.c_str(), width, height, 4, hImage.data(), stride);
         std::cout << "Saved image to " << outfile << std::endl;
+
+
+        CUDA_CHECK(cudaFree((void*)d_materials));
+        CUDA_CHECK(cudaFree((void*)d_mat_indices));
 
         CUDA_CHECK(cudaFree((void*)d_gas_output_buffer));
         CUDA_CHECK(cudaFree((void*)d_vertices));
